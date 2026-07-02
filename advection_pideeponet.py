@@ -33,6 +33,13 @@ import torch
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_ROOT = SCRIPT_DIR / "outputs"
 
+# ============================================================================
+# 控制开关
+# ============================================================================
+TRAIN_MODE = False                     # True: 训练模式；False: 载入已有模型做预测
+MODEL_PATH = "outputs/advection_aligned/advection_aligned_pideeponet-50000.pt"
+
+
 # 将影响训练和数据格式的参数集中放在这里，方便继续调参。
 CONFIG = {
     # "aligned" 使用 Cartesian product 数据；"unaligned" 使用逐点配对数据。
@@ -308,8 +315,8 @@ def save_prediction_figure(x, t, eval_points, branch_values, u_pred, u_true, out
     logger.info("预测对比图已保存到: %s", prediction_path)
 
 
-def train_and_save(config):
-    """构建数据与网络，训练模型，并保存所有本地结果。"""
+def run_model(config):
+    """构建数据与网络，根据 TRAIN_MODE 决定训练或载入模型，然后做预测和可视化。"""
 
     mode = config["mode"]
     output_dir = OUTPUT_ROOT / f"advection_{mode}"
@@ -319,17 +326,7 @@ def train_and_save(config):
     logger.info("DeepXDE 后端: %s", dde.backend.backend_name)
     logger.info("运行模式: %s", mode)
     logger.info("输出目录: %s", output_dir)
-    logger.info(
-        "训练参数: num_domain=%d, num_initial=%d, num_eval_points=%d, "
-        "num_function=%d, iterations=%d, learning_rate=%.1e, hidden_layers=%s",
-        config["num_domain"],
-        config["num_initial"],
-        config["num_eval_points"],
-        config["num_function"],
-        config["iterations"],
-        config["learning_rate"],
-        config["hidden_layers"],
-    )
+    logger.info("TRAIN_MODE: %s", TRAIN_MODE)
 
     _, data_pde = build_pde(config)
     operator_data, eval_points = build_operator_data(config, data_pde)
@@ -338,25 +335,42 @@ def train_and_save(config):
     model = dde.Model(operator_data, net)
     model.compile("adam", lr=float(config["learning_rate"]))
 
-    logger.info("开始训练模型...")
-    loss_history, train_state = model.train(
-        iterations=int(config["iterations"]),
-        display_every=int(config["display_every"]),
-    )
-    logger.info("训练完成，最佳 step: %s", train_state.best_step)
+    if TRAIN_MODE:
+        logger.info(
+            "训练参数: num_domain=%d, num_initial=%d, num_eval_points=%d, "
+            "num_function=%d, iterations=%d, learning_rate=%.1e, hidden_layers=%s",
+            config["num_domain"],
+            config["num_initial"],
+            config["num_eval_points"],
+            config["num_function"],
+            config["iterations"],
+            config["learning_rate"],
+            config["hidden_layers"],
+        )
+        logger.info("开始训练模型...")
+        loss_history, train_state = model.train(
+            iterations=int(config["iterations"]),
+            display_every=int(config["display_every"]),
+        )
+        logger.info("训练完成，最佳 step: %s", train_state.best_step)
 
-    model_prefix = output_dir / f"advection_{mode}_pideeponet"
-    model_path = model.save(str(model_prefix), protocol="backend", verbose=1)
-    logger.info("PyTorch 模型已保存到: %s", model_path)
+        model_prefix = output_dir / f"advection_{mode}_pideeponet"
+        model.save(str(model_prefix), protocol="backend", verbose=1)
 
-    save_convergence_history(loss_history, output_dir)
+        save_convergence_history(loss_history, output_dir)
+
+        best_step = train_state.best_step
+    else:
+        logger.info("载入已有模型: %s", MODEL_PATH)
+        model.restore(MODEL_PATH)
+        best_step = None
+
     x, t, branch_values, u_pred, u_true = predict_advection(model, config, eval_points)
     save_prediction_figure(x, t, eval_points, branch_values, u_pred, u_true, output_dir, mode)
 
     return {
-        "model_path": Path(model_path),
         "output_dir": output_dir,
-        "best_step": train_state.best_step,
+        "best_step": best_step,
     }
 
 
@@ -364,7 +378,7 @@ def main(overrides=None):
     """脚本入口；测试时可传入 overrides 临时缩小训练规模。"""
 
     config = make_config(overrides)
-    return train_and_save(config)
+    return run_model(config)
 
 
 if __name__ == "__main__":
